@@ -1,0 +1,27 @@
+{
+  "name": "eagle-radar",
+  "displayName": "Eagle Radar Analysis",
+  "description": "Georeferenced radar analysis panels, message converters and KPI views for Eagle Radar ROS2 data.",
+  "publisher": "Eagle",
+  "version": "0.1.0",
+  "license": "UNLICENSED",
+  "private": true,
+  "homepage": "",
+  "keywords": ["radar", "kpi", "map", "ros2"],
+  "main": "dist/extension.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "leaflet": "1.9.4"
+  },
+  "devDependencies": {
+    "@types/leaflet": "1.9.22",
+    "@types/node": "22.10.0",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,21 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	root * /src
+	encode zstd gzip
+
+	# Same-origin proxies so the browser never needs CORS.
+	handle_path /kpi/* {
+		reverse_proxy {$KPI_UPSTREAM}
+	}
+	handle_path /data/* {
+		reverse_proxy {$DATA_UPSTREAM}
+	}
+
+	# Built-in extension bundle must never be cached stale.
+	header /radar-extension/* Cache-Control "no-cache"
+	file_server
+}

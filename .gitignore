@@ -37,3 +37,8 @@ test-results/*
 .scannerwork
 eslint-report.json
 blob-report/*
+
+# radar fork
+__pycache__/
+.pytest_cache/
+*.pyc

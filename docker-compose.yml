@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: LicenseRef-Eagle-Proprietary
+#
+#   cp .env.example .env   # point RAW_DATA_DIR / PROCESSED_DATA_DIR at your bag folders
+#   docker compose up --build
+#   open http://localhost:8080
+name: eagle-radar
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    image: eagle-radar-web:${TAG:-dev}
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      radar-kpi:
+        condition: service_started
+      data-server:
+        condition: service_started
+    restart: unless-stopped
+
+  radar-kpi:
+    build:
+      context: services/radar-kpi
+      target: runtime
+    image: eagle-radar-kpi:${TAG:-dev}
+    environment:
+      RADAR_ROOTS: "raw=/data/raw,processed=/data/processed"
+      RADAR_CACHE_DIR: /cache
+    volumes:
+      - ${RAW_DATA_DIR:-./data/raw}:/data/raw:ro
+      - ${PROCESSED_DATA_DIR:-./data/processed}:/data/processed:ro
+      - kpi-cache:/cache
+    restart: unless-stopped
+
+  data-server:
+    build:
+      context: .
+      dockerfile: docker/data-server.Dockerfile
+    image: eagle-radar-data:${TAG:-dev}
+    volumes:
+      - ${RAW_DATA_DIR:-./data/raw}:/data/raw:ro
+      - ${PROCESSED_DATA_DIR:-./data/processed}:/data/processed:ro
+    restart: unless-stopped
+
+volumes:
+  kpi-cache:

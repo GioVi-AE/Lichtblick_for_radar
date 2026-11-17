@@ -1,0 +1,27 @@
+{
+  "configById": {
+    "eagle-radar.RadarRuns!runs01": {},
+    "eagle-radar.RadarMap!map01": {},
+    "eagle-radar.RadarKpi!kpi01": {},
+    "eagle-radar.RvMap!rv01": {}
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1.0 },
+  "layout": {
+    "first": "eagle-radar.RadarRuns!runs01",
+    "second": {
+      "first": "eagle-radar.RadarMap!map01",
+      "second": {
+        "first": "eagle-radar.RadarKpi!kpi01",
+        "second": "eagle-radar.RvMap!rv01",
+        "direction": "column",
+        "splitPercentage": 62
+      },
+      "direction": "row",
+      "splitPercentage": 58
+    },
+    "direction": "row",
+    "splitPercentage": 22
+  }
+}

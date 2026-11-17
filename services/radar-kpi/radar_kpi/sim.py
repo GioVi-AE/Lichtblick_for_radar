@@ -1,0 +1,273 @@
+# SPDX-License-Identifier: LicenseRef-Eagle-Proprietary
+"""Synthetic eagle_radar_msgs bag generator.
+
+Produces an MCAP (ROS 2 / CDR) with
+  * /radar/detections   eagle_radar_msgs/msg/CVDetection  (object_id empty)
+  * /radar/tracks       eagle_radar_msgs/msg/CVDetection  (object_id = track id)
+  * /radar/track_kpi    eagle_radar_msgs/msg/TrackKpiStatus
+  * /radar/rvmap_health eagle_radar_msgs/msg/RvMapHealth
+  * /target/mavros/global_position/global  sensor_msgs/msg/NavSatFix  (ground truth)
+  * /carrier/mavros/global_position/global sensor_msgs/msg/NavSatFix
+so that the KPI engine, the API and the UI can be exercised without real data. The scenario
+parameters are returned so tests can compare measured KPIs with the injected truth.
+
+    python -m radar_kpi.sim out_dir [--seconds 120] [--seed 1]
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+import numpy as np
+from mcap_ros2.writer import Writer
+
+from .geo import ned_to_lla
+
+HEADER = """builtin_interfaces/Time stamp
+string frame_id
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+TIME = "int32 sec\nuint32 nanosec\n"
+
+CV_DETECTION = """std_msgs/Header header
+float64 latitude
+float64 longitude
+float64 altitude
+float64[9] position_covariance
+uint8 position_covariance_type
+string object_id
+string object_class
+string sensor_id
+float32 confidence
+string datum
+string coordinate_system
+string source_adapter
+string state
+float64 vx
+float64 vy
+float64 vz
+string external_id
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+TRACK_KPI = """builtin_interfaces/Time stamp
+string utc_time
+int32 track_id
+bool confirmed
+uint32 total_updates
+uint32 missed_updates
+float32 consistency
+float32 avg_magnitude
+float32 last_magnitude
+float32 error_probability
+float32 confidence
+float32 cov_xx
+float32 cov_xy
+float32 cov_xz
+float32 cov_yy
+float32 cov_yz
+float32 cov_zz
+float32 rf_signal_power
+float32 rf_noise_power
+float32 rf_snr_db
+bool rf_health_valid
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+RV_HEALTH = """builtin_interfaces/Time stamp
+string utc_time
+bool rvmap_valid
+uint32 seq
+float32 age_ms
+float32 expected_period_ms
+float32 saturation_ratio
+float32 max_value
+float32 mean_value
+uint32 saturated_bin_count
+uint32 total_bin_count
+bool timeout_active
+bool saturated_active
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+NAVSAT = """std_msgs/Header header
+sensor_msgs/NavSatStatus status
+float64 latitude
+float64 longitude
+float64 altitude
+float64[9] position_covariance
+uint8 position_covariance_type
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+================================================================================
+MSG: sensor_msgs/NavSatStatus
+int8 status
+uint16 service
+"""
+
+
+@dataclass
+class Scenario:
+    seconds: float = 120.0
+    seed: int = 1
+    start_time: float = 1_790_000_000.0
+    anchor: tuple[float, float, float] = (50.8717, 10.7378, 300.0)
+    p_detect: float = 0.8
+    sigma_h_m: float = 8.0
+    sigma_v_m: float = 10.0
+    clutter_per_scan: float = 0.15
+    scan_hz: float = 5.0
+    time_offset_s: float = 0.0  # detections describe the target `offset` s after their stamp (lag)
+    target_speed_mps: float = 15.0
+    target_range_m: float = 600.0
+    carrier_gps_hz: float = 10.0
+
+
+def _stamp(t: float) -> dict:
+    sec = int(np.floor(t))
+    return {"sec": sec, "nanosec": int(round((t - sec) * 1e9))}
+
+
+def _header(t: float, frame: str) -> dict:
+    return {"stamp": _stamp(t), "frame_id": frame}
+
+
+def target_ned(t_rel: np.ndarray | float, sc: Scenario) -> np.ndarray:
+    """Target path in NED relative to the carrier: a circle of radius range/2 centred at `range` N of carrier."""
+    t = np.atleast_1d(np.asarray(t_rel, dtype=float))
+    r = sc.target_range_m * 0.35
+    w = sc.target_speed_mps / r
+    n = sc.target_range_m + r * np.sin(w * t)
+    e = r * (1 - np.cos(w * t))
+    d = -80.0 + 10.0 * np.sin(0.2 * t)
+    return np.stack([n, e, d], axis=1)
+
+
+def generate(path: Path, sc: Scenario | None = None) -> dict:
+    """Write the bag to `path` (a .mcap file) and return the injected ground-truth description."""
+    sc = sc or Scenario()
+    rng = np.random.default_rng(sc.seed)
+    a = sc.anchor
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def lla(ned: np.ndarray) -> np.ndarray:
+        lat, lon, alt = ned_to_lla(a, np.atleast_2d(ned))
+        return np.stack([lat, lon, alt], axis=1)
+
+    stats = {"scenario": asdict(sc), "n_det": 0, "n_true": 0, "n_clutter": 0, "bins_detected": set(), "n_bins": int(sc.seconds)}
+    with open(path, "wb") as fh:
+        w = Writer(fh)
+        s_cv = w.register_msgdef("eagle_radar_msgs/msg/CVDetection", CV_DETECTION)
+        s_kpi = w.register_msgdef("eagle_radar_msgs/msg/TrackKpiStatus", TRACK_KPI)
+        s_rv = w.register_msgdef("eagle_radar_msgs/msg/RvMapHealth", RV_HEALTH)
+        s_nav = w.register_msgdef("sensor_msgs/msg/NavSatFix", NAVSAT)
+
+        def navsat(topic: str, t: float, pos: np.ndarray) -> None:
+            w.write_message(topic=topic, schema=s_nav, message={
+                "header": _header(t, "gps"), "status": {"status": 0, "service": 1},
+                "latitude": float(pos[0]), "longitude": float(pos[1]), "altitude": float(pos[2]),
+                "position_covariance": [0.0] * 9, "position_covariance_type": 0,
+            }, log_time=int(t * 1e9), publish_time=int(t * 1e9))
+
+        def cv(topic: str, t: float, pos: np.ndarray, oid: str, conf: float, state: str, cov: float = 0.0) -> None:
+            w.write_message(topic=topic, schema=s_cv, message={
+                "header": _header(t, "map"), "latitude": float(pos[0]), "longitude": float(pos[1]), "altitude": float(pos[2]),
+                "position_covariance": [cov, 0, 0, 0, cov, 0, 0, 0, cov], "position_covariance_type": 2 if cov else 0,
+                "object_id": oid, "object_class": "uav" if oid else "", "sensor_id": "sim", "confidence": float(conf),
+                "datum": "WGS84", "coordinate_system": "ENU", "source_adapter": "sim", "state": state,
+                "vx": 0.0, "vy": 0.0, "vz": 0.0, "external_id": "",
+            }, log_time=int(t * 1e9), publish_time=int(t * 1e9))
+
+        # ground truth + carrier navsat
+        for t_rel in np.arange(0.0, sc.seconds + 1e-9, 0.1):
+            t = sc.start_time + t_rel
+            navsat("/target/mavros/global_position/global", t, lla(target_ned(t_rel, sc))[0])
+            navsat("/carrier/mavros/global_position/global", t, np.array(a))
+
+        # detections / tracks
+        smoothed = None
+        n_scans = int(sc.seconds * sc.scan_hz)
+        for k in range(n_scans):
+            t_rel = k / sc.scan_hz
+            t = sc.start_time + t_rel
+            truth = target_ned(t_rel + sc.time_offset_s, sc)[0]
+            if rng.random() < sc.p_detect:
+                noise = np.array([rng.normal(0, sc.sigma_h_m), rng.normal(0, sc.sigma_h_m), rng.normal(0, sc.sigma_v_m)])
+                det = truth + noise
+                cv("/radar/detections", t, lla(det)[0], "", 0.9, "")
+                stats["n_det"] += 1
+                stats["n_true"] += 1
+                stats["bins_detected"].add(int(t_rel))
+                smoothed = det if smoothed is None else 0.6 * smoothed + 0.4 * det
+                # id switch half-way through
+                tid = "T1" if t_rel < sc.seconds / 2 else "T2"
+                cv("/radar/tracks", t, lla(smoothed)[0], tid, 0.95, "CONFIRMED", cov=sc.sigma_h_m ** 2)
+            for _ in range(rng.poisson(sc.clutter_per_scan)):
+                far = np.array([rng.uniform(300, 3000), rng.uniform(-1500, 1500), rng.uniform(-300, 0)])
+                cv("/radar/detections", t, lla(far)[0], "", 0.3, "")
+                stats["n_det"] += 1
+                stats["n_clutter"] += 1
+
+        # track status + rv-map health
+        for k in range(int(sc.seconds)):
+            t = sc.start_time + k
+            snr = 18.0 + 3.0 * np.sin(0.1 * k)
+            w.write_message(topic="/radar/track_kpi", schema=s_kpi, message={
+                "stamp": _stamp(t), "utc_time": "", "track_id": 1 if k < sc.seconds / 2 else 2, "confirmed": True,
+                "total_updates": k * 4, "missed_updates": k, "consistency": 1.5, "avg_magnitude": 1.0, "last_magnitude": 1.0,
+                "error_probability": 0.01, "confidence": 0.9, "cov_xx": 64.0, "cov_xy": 0.0, "cov_xz": 0.0, "cov_yy": 64.0,
+                "cov_yz": 0.0, "cov_zz": 100.0, "rf_signal_power": 10.0, "rf_noise_power": 1.0, "rf_snr_db": float(snr),
+                "rf_health_valid": True,
+            }, log_time=int(t * 1e9), publish_time=int(t * 1e9))
+            sat = 30 <= k < 35
+            w.write_message(topic="/radar/rvmap_health", schema=s_rv, message={
+                "stamp": _stamp(t), "utc_time": "", "rvmap_valid": True, "seq": k, "age_ms": 90.0 if k != 60 else 800.0,
+                "expected_period_ms": 100.0, "saturation_ratio": 0.2 if sat else 0.0, "max_value": 1.0, "mean_value": 0.1,
+                "saturated_bin_count": 2000 if sat else 0, "total_bin_count": 10000, "timeout_active": k == 60,
+                "saturated_active": sat,
+            }, log_time=int(t * 1e9), publish_time=int(t * 1e9))
+        w.finish()
+
+    stats["bins_detected"] = len(stats["bins_detected"])
+    return stats
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("out_dir", type=Path)
+    ap.add_argument("--seconds", type=float, default=120.0)
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--time-offset", type=float, default=0.0)
+    ns = ap.parse_args()
+    bag = ns.out_dir / f"sim_{ns.seed}" / "sim.mcap"
+    s = generate(bag, Scenario(seconds=ns.seconds, seed=ns.seed, time_offset_s=ns.time_offset))
+    print(f"wrote {bag}: {s['n_det']} detections ({s['n_clutter']} clutter)")
+
+
+if __name__ == "__main__":
+    main()

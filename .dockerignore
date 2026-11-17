@@ -8,3 +8,9 @@
 dist/
 node_modules/
 Dockerfile
+.git/
+services/
+data/
+extensions/*/node_modules/
+extensions/*/dist/
+**/__pycache__/

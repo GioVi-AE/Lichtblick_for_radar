@@ -1,0 +1,8 @@
+Copyright (c) Eagle. All rights reserved.
+
+Files carrying the header "SPDX-License-Identifier: LicenseRef-Eagle-Proprietary", and the directories
+extensions/eagle-radar/, services/radar-kpi/, docker/, layouts/radar-analysis.json and docs/radar/, are
+proprietary and confidential. No licence is granted to copy, distribute or modify them without written permission.
+
+All other files originate from Lichtblick (https://github.com/lichtblick-suite/lichtblick) and remain under the
+Mozilla Public License 2.0 (see LICENSE). Modifications to MPL-licensed files are listed in PATCHES.md and stay MPL-2.0.

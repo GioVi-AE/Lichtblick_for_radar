@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: LicenseRef-Eagle-Proprietary
+name: radar-ci
+on:
+  push:
+    branches: [main, radar-main]
+  pull_request:
+
+jobs:
+  kpi-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: pytest (runs inside the image build)
+        run: docker build --target test services/radar-kpi
+
+  extension:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/eagle-radar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  images:
+    runs-on: ubuntu-latest
+    needs: [kpi-service, extension]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build all images
+        run: docker compose build
+      - name: Smoke test the stack (empty catalogue)
+        run: |
+          docker compose up -d
+          for i in $(seq 1 30); do curl -fsS localhost:8080/kpi/health && break || sleep 2; done
+          scripts/smoke.sh
+          docker compose down
