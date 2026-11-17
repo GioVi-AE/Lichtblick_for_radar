@@ -139,3 +139,77 @@ def estimate_anchor(
         if best is None or resid < (best.residual_std_m or np.inf):
             best = cand
     return best
+
+
+# ----------------------------------------------------------------------------- bare local x/y frames
+# eagle_radar_msgs Track/Detection carry only x/y in a frame called "radar_frame" whose axes are not
+# specified. We therefore treat the frame as a hypothesis and let the ground truth decide.
+
+LOCAL_XY_FRAMES = ("NED", "ENU", "PLATFORM_NED", "PLATFORM_ENU")
+
+
+def local_xy_to_ned(frame: str, t, xy, anchor: tuple[float, float, float], carrier: "Track | None", z=None) -> np.ndarray:
+    """x/y (m) of the given frame hypothesis -> NED about `anchor` (z = platform down, or 0 for world frames).
+
+    NED: (x=N, y=E); ENU: (x=E, y=N); PLATFORM_*: same axes but relative to the radar carrier position at time t.
+    Samples without carrier coverage become NaN for PLATFORM_*.
+    """
+    xy = np.asarray(xy, dtype=float)[:, :2]
+    n, e = (xy[:, 0], xy[:, 1]) if frame.endswith("NED") else (xy[:, 1], xy[:, 0])
+    zz = np.zeros_like(n) if z is None else np.asarray(z, dtype=float)
+    if not frame.endswith("NED"):
+        zz = -zz  # ENU z is up
+    out = np.stack([n, e, zz], axis=1)
+    if frame.startswith("PLATFORM"):
+        if carrier is None:
+            out[:] = np.nan
+            return out
+        clat, clon, calt, ok = carrier.at(np.asarray(t, dtype=float), 5.0)
+        base = lla_to_ned(anchor, clat, clon, calt)
+        out = out + base
+        out[~ok] = np.nan
+    return out
+
+
+def select_local_xy_frame(
+    t,
+    xy,
+    anchor: tuple[float, float, float],
+    carrier: "Track | None",
+    gts: "dict[str, Track]",
+    max_gap_s: float = 5.0,
+    max_samples: int = 3000,
+) -> dict | None:
+    """Pick the frame hypothesis (and ground-truth track) with the smallest median horizontal error.
+
+    Returns {selected, target, median_horiz_m: {frame: best median over gts}, confident} or None.
+    `confident` = best median < 70 % of the best median of any *other* frame.
+    """
+    t = np.asarray(t, dtype=float)
+    if len(t) == 0 or not gts:
+        return None
+    stride = max(1, len(t) // max_samples)
+    ts, xys = t[::stride], np.asarray(xy, dtype=float)[::stride]
+    scores: dict[str, float] = {}
+    best_target: dict[str, str] = {}
+    for fr in LOCAL_XY_FRAMES:
+        ned = local_xy_to_ned(fr, ts, xys, anchor, carrier)
+        for name, gt in gts.items():
+            glat, glon, galt, valid = gt.at(ts, max_gap_s)
+            valid &= np.isfinite(ned[:, 0])
+            if valid.sum() < 3:
+                continue
+            g = lla_to_ned(anchor, glat[valid], glon[valid], galt[valid])
+            d = float(np.median(np.hypot(ned[valid, 0] - g[:, 0], ned[valid, 1] - g[:, 1])))
+            if d < scores.get(fr, np.inf):
+                scores[fr], best_target[fr] = d, name
+    if not scores:
+        return None
+    sel = min(scores, key=scores.get)  # type: ignore[arg-type]
+    others = [v for k, v in scores.items() if k != sel]
+    return {
+        "selected": sel,
+        "target": best_target[sel],
+        "median_horiz_m": scores,
+        "confident": bool(not others or scores[sel] < 0.7 * min(others)),
+    }

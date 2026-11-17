@@ -11,8 +11,8 @@
 //   sensor_msgs/NavSatFix                  carrier (radar platform) and target (ground truth)
 //   nav_msgs/Odometry named ground_truth   local position (ignored while it is all zeros)
 
-import { Lla } from "./geo";
-import { Anchor, LocalSample, TimedTrack, estimateAnchor, localToLla } from "./georef";
+import { Lla, nedToLla } from "./geo";
+import { Anchor, LocalSample, TimedTrack, XyFrame, XySelection, estimateAnchor, localToLla, selectXyFrame, xyToNed } from "./georef";
 import { MessageEvent, Time } from "./lichtblick";
 
 export type Role = "carrier" | "target" | "ignore";
@@ -89,6 +89,8 @@ interface PendingLocal {
   confidence?: number;
   radialVel?: number;
   platform?: [number, number, number];
+  /** bare x/y in the unspecified eagle_radar "radar_frame" (Track/DetectionArray) */
+  bare?: boolean;
 }
 
 export interface RoleMap {
@@ -136,6 +138,16 @@ export class RadarStore {
 
   manualAnchor: Anchor | undefined;
   serviceAnchor: Anchor | undefined;
+  /** Axis convention of bare Track/Detection x/y: explicit choice, else the service's, else decided live from ground truth. */
+  xyFrame: "auto" | XyFrame = "auto";
+  serviceXyFrame: XyFrame | undefined;
+  private autoXy: XySelection | undefined;
+  /** Frame actually used for bare x/y (undefined while undecided). */
+  xyInfo: { frame: XyFrame; origin: "manual" | "service" | "ground-truth"; confident: boolean; scores?: XySelection["medianHorizM"] } | undefined;
+  /** Number of bare x/y samples waiting for a frame decision. */
+  get pendingXy(): number {
+    return this.pending.filter((p) => p.bare).length;
+  }
   private autoAnchor: Anchor | undefined;
   private platformLocal: LocalSample[] = [];
   private pending: PendingLocal[] = [];
@@ -190,6 +202,8 @@ export class RadarStore {
     this.platformLocal = [];
     this.pending = [];
     this.autoAnchor = undefined;
+    this.autoXy = undefined;
+    this.xyInfo = undefined;
     this.pendingAnchorKey = "";
   }
 
@@ -278,14 +292,19 @@ export class RadarStore {
       case "detectionArray": {
         const t = timeToSec(m.header?.stamp) || recv;
         for (const d of (m.detections ?? []) as { x: number; y: number; amplitude?: number }[]) {
-          this.pending.push({ kind: "det", x: d.x, y: d.y, z: 0, t, recv, topic: ev.topic, power: d.amplitude });
+          this.pending.push({ kind: "det", x: d.x, y: d.y, z: 0, t, recv, topic: ev.topic, power: d.amplitude, bare: true });
         }
         return;
       }
       case "trackArray": {
         const t = timeToSec(m.header?.stamp) || recv;
-        for (const tr of (m.tracks ?? []) as { id: number; x: number; y: number }[]) {
-          this.pending.push({ kind: "track", x: tr.x, y: tr.y, z: 0, t, recv, topic: ev.topic, id: String(tr.id) });
+        for (const tr of (m.tracks ?? []) as { id?: number; track_id?: number; x?: number; y?: number; position?: ArrayLike<number> }[]) {
+          // two variants share this schema name: {id, x, y} (eagle_radar_msgs) and {track_id, position[3]} (EagleRadar)
+          const p = tr.position;
+          const x = p ? p[0]! : tr.x!;
+          const y = p ? p[1]! : tr.y!;
+          const z = p ? p[2]! : 0;
+          this.pending.push({ kind: "track", x, y, z, t, recv, topic: ev.topic, id: String(tr.track_id ?? tr.id), bare: true });
         }
         return;
       }
@@ -339,25 +358,69 @@ export class RadarStore {
         }
       }
     }
+    const rest: PendingLocal[] = [];
     const anchor = this.anchor;
-    if (!anchor) return;
-    for (const p of this.pending) {
-      const lla = localToLla(anchor, p.x, p.y, p.z);
-      if (p.kind === "det") {
-        this.detections.push({
-          t: p.t, recv: p.recv, ...lla, range: p.range, power: p.power, confidence: p.confidence,
-          radialVel: p.radialVel, topic: p.topic,
-          platform: p.platform ? localToLla(anchor, p.platform[0], p.platform[1], p.platform[2]) : undefined,
-        });
+    const bare = this.pending.filter((p) => p.bare);
+    const normal = this.pending.filter((p) => !p.bare);
+    if (anchor) {
+      for (const p of normal) this.emit(anchor, localToLla(anchor, p.x, p.y, p.z), p);
+    } else {
+      rest.push(...normal);
+    }
+    if (bare.length > 0) {
+      const base: Lla | undefined = anchor ?? this.carrierFirstFix();
+      const carrier = this.effectiveCarrier();
+      const frame = base ? this.decideXyFrame(bare, base, carrier) : undefined;
+      if (base && frame) {
+        for (const p of bare) {
+          const ned = xyToNed(frame, base, { t: p.t, x: p.x, y: p.y, z: p.z }, carrier);
+          if (ned) this.emit(base, nedToLla(base, ned), p);
+        }
       } else {
-        const bag = p.kind === "track" ? this.tracks : this.gtTracks;
-        const key = `${p.topic}#${p.id ?? ""}`;
-        let s = bag.get(key);
-        if (!s) bag.set(key, (s = { key, id: p.id ?? "", topic: p.topic, points: [] }));
-        s.points.push({ t: p.t, recv: p.recv, ...lla });
+        rest.push(...bare);
       }
     }
-    this.pending = [];
+    this.pending = rest;
+  }
+
+  private carrierFirstFix(): Lla | undefined {
+    const c = this.effectiveCarrier();
+    return c.length > 0 ? { lat: c.lat[0]!, lon: c.lon[0]!, alt: c.alt[0]! } : undefined;
+  }
+
+  private decideXyFrame(bare: readonly PendingLocal[], base: Lla, carrier: TimedTrack): XyFrame | undefined {
+    if (this.xyFrame !== "auto") {
+      this.xyInfo = { frame: this.xyFrame, origin: "manual", confident: true };
+      return this.xyFrame;
+    }
+    if (this.serviceXyFrame) {
+      this.xyInfo = { frame: this.serviceXyFrame, origin: "service", confident: true };
+      return this.serviceXyFrame;
+    }
+    if (this.autoXy) return this.autoXy.selected;
+    const gts = this.groundTruthTracks().filter((t) => t.length > 1);
+    if (gts.length === 0 || bare.length < 20) return undefined;
+    const sel = selectXyFrame(bare.map((p) => ({ t: p.t, x: p.x, y: p.y, z: p.z })), base, carrier, gts);
+    if (!sel) return undefined;
+    this.autoXy = sel;
+    this.xyInfo = { frame: sel.selected, origin: "ground-truth", confident: sel.confident, scores: sel.medianHorizM };
+    return sel.selected;
+  }
+
+  private emit(anchor: Lla, lla: Lla, p: PendingLocal): void {
+    if (p.kind === "det") {
+      this.detections.push({
+        t: p.t, recv: p.recv, ...lla, range: p.range, power: p.power, confidence: p.confidence,
+        radialVel: p.radialVel, topic: p.topic,
+        platform: p.platform ? localToLla(anchor as Anchor, p.platform[0], p.platform[1], p.platform[2]) : undefined,
+      });
+    } else {
+      const bag = p.kind === "track" ? this.tracks : this.gtTracks;
+      const key = `${p.topic}#${p.id ?? ""}`;
+      let s = bag.get(key);
+      if (!s) bag.set(key, (s = { key, id: p.id ?? "", topic: p.topic, points: [] }));
+      s.points.push({ t: p.t, recv: p.recv, ...lla });
+    }
   }
 
   /** All GT sources merged into time-interpolatable tracks (NavSat target topics + local GT messages). */

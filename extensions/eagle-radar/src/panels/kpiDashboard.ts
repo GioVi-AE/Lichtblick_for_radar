@@ -151,12 +151,20 @@ export function initKpiDashboard(context: PanelExtensionContext): () => void {
       grid.append(card("Confirmed", pct(t.confirmed_ratio)));
       if (t.continuity != undefined) grid.append(card("Continuity", pct(t.continuity), `${t.fragmentations ?? 0} frags, ${t.id_switches ?? 0} ID sw.`));
       if (t.nees_consistency != undefined) grid.append(card("NEES ok", pct(t.nees_consistency), "χ² 95 %"));
+      if (t.xy_frame) grid.append(card("Track x/y axes", t.xy_frame.selected.replace("_", " "), t.xy_frame.confident ? "chosen by ground truth" : "ambiguous", t.xy_frame.confident ? "er-good" : "er-warn"));
       if (t.mean_snr_db != undefined) grid.append(card("Track SNR", fmt(t.mean_snr_db, 1, " dB")));
     }
     if (r.health) {
       const hl = r.health;
-      grid.append(card("RV-map sat.", `${hl.saturated_frames}/${hl.frames}`, `max ${pct(hl.max_saturation_ratio)}`, hl.saturated_frames > 0 ? "er-warn" : "er-good"));
-      grid.append(card("RV-map timeouts", String(hl.timeout_frames), `max age ${fmt(hl.max_age_ms, 0, " ms")}`, hl.timeout_frames > 0 ? "er-bad" : "er-good"));
+      const derived = hl.source !== "RvMapHealth";
+      if (derived) {
+        grid.append(card("RV-map rate", hl.median_period_ms ? `${fmt(1000 / hl.median_period_ms, 1, " Hz")}` : "–", `${hl.frames} frames · p99 ${fmt(hl.p99_period_ms, 0, " ms")}`));
+        grid.append(card("RV-map gaps", String(hl.timeout_frames), `max gap ${fmt(hl.max_age_ms, 0, " ms")} (> 5× period)`, hl.timeout_frames > 0 ? "er-warn" : "er-good"));
+        grid.append(card("RV-map peak", fmt(hl.peak_median, 0), `max ${fmt(hl.peak_max, 0)} · measured, saturation n/a`));
+      } else {
+        grid.append(card("RV-map sat.", `${hl.saturated_frames}/${hl.frames}`, `max ${pct(hl.max_saturation_ratio)}`, (hl.saturated_frames ?? 0) > 0 ? "er-warn" : "er-good"));
+        grid.append(card("RV-map timeouts", String(hl.timeout_frames), `max age ${fmt(hl.max_age_ms, 0, " ms")}`, hl.timeout_frames > 0 ? "er-bad" : "er-good"));
+      }
     }
     kids.push(grid);
 

@@ -8,6 +8,7 @@ TrackKpiStatus, GeoRegRVMap (status only).
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,6 +84,7 @@ class Status:
     track_kpi: list[dict] = field(default_factory=list)
     rv_health: list[dict] = field(default_factory=list)
     rv_status: dict | None = None
+    rv_derived: dict | None = None  # statistics measured from the RV maps themselves (no RvMapHealth topic)
 
 
 def _arr(x, n=None):
@@ -194,14 +196,22 @@ def read_tracks(files: list[Path], topic: str, schema: str) -> TrackSet | None:
     if kind == KIND_TRACK_ARRAY:
         for _, _, log_time, m in iter_messages(files, [topic]):
             st = stamp_to_sec(m.header.stamp) or log_time * 1e-9
+            has_z = False
             for tr in m.tracks:
                 t.append(st)
-                ids.append(str(tr.id))
-                local.append((tr.x, tr.y, 0.0))
-                state.append(str(tr.status))
+                if hasattr(tr, "position"):  # EagleRadar variant: track_id + position[3] (NED), confidence, classification
+                    ids.append(str(tr.track_id))
+                    p = tr.position
+                    local.append((p[0], p[1], p[2]))
+                    state.append("CONFIRMED" if float(getattr(tr, "confidence", 1.0)) >= 0.5 else "TENTATIVE")
+                    has_z = True
+                else:  # eagle_radar_msgs variant: id + x/y + status
+                    ids.append(str(tr.id))
+                    local.append((tr.x, tr.y, 0.0))
+                    state.append(str(tr.status))
         if not t:
             return None
-        return TrackSet(topic, kind, np.asarray(t), np.asarray(ids), local=np.asarray(local), state=np.asarray(state), has_z=False)
+        return TrackSet(topic, kind, np.asarray(t), np.asarray(ids), local=np.asarray(local), state=np.asarray(state), has_z=has_z)
     if kind == KIND_GEO_TRACK:
         for _, _, log_time, m in iter_messages(files, [topic]):
             t.append(float(m.timestamp) or log_time * 1e-9)
@@ -248,3 +258,59 @@ def read_status(files: list[Path], topics: list[tuple[str, str]], rv_sample_cap:
                     "timeout": bool(m.timeout_active), "saturated": bool(m.saturated_active),
                 })
     return st
+
+
+def read_rvmap_stats(files: list[Path], topic: str, schema: str, value_stride: int = 25) -> dict | None:
+    """Health statistics measured directly on GeoRegRVMap / RVMap frames.
+
+    Used when a bag has no RvMapHealth topic. Frame times come from the payload (GeoRegRVMap starts with a float64
+    timestamp, read without decoding the 250 kB array); peak/mean values are sampled every `value_stride` frames.
+    Saturation cannot be derived (the ADC/normalisation limit is not in the data), so it is reported as unknown.
+    """
+    from mcap.reader import make_reader
+    from mcap_ros2.decoder import DecoderFactory
+
+    base = schema.rsplit("/", 1)[-1]
+    times: list[float] = []
+    peaks: list[float] = []
+    means: list[float] = []
+    dec = DecoderFactory()
+    decoders: dict[int, object] = {}
+    n = 0
+    for p in files:
+        with open(p, "rb") as fh:
+            reader = make_reader(fh)
+            for sch, ch, msg in reader.iter_messages(topics=[topic]):
+                n += 1
+                sample = (n - 1) % value_stride == 0
+                if base == "GeoRegRVMap" and not sample:
+                    times.append(struct.unpack_from("<d", msg.data, 4)[0])
+                    continue
+                d = decoders.get(sch.id) or decoders.setdefault(sch.id, dec.decoder_for("cdr", sch))
+                m = d(msg.data)  # type: ignore[operator]
+                if base == "GeoRegRVMap":
+                    times.append(float(m.timestamp))
+                    arr = np.asarray(m.rvmap, dtype=np.float64)
+                else:
+                    times.append(stamp_to_sec(m.header.stamp))
+                    arr = np.asarray(m.data, dtype=np.float64)
+                if arr.size:
+                    peaks.append(float(arr.max()))
+                    means.append(float(arr.mean()))
+    if n == 0:
+        return None
+    t = np.sort(np.asarray(times))
+    dt = np.diff(t) if len(t) > 1 else np.array([])
+    med = float(np.median(dt)) if dt.size else None
+    timeouts = int((dt > max(5 * med, 0.1)).sum()) if med else 0
+    return {
+        "frames": int(n),
+        "median_period_ms": None if med is None else med * 1e3,
+        "p99_period_ms": float(np.percentile(dt, 99) * 1e3) if dt.size else None,
+        "max_gap_ms": float(dt.max() * 1e3) if dt.size else None,
+        "timeout_gaps": timeouts,
+        "peak_median": float(np.median(peaks)) if peaks else None,
+        "peak_max": float(np.max(peaks)) if peaks else None,
+        "mean_median": float(np.median(means)) if means else None,
+        "sampled_frames": len(peaks),
+    }

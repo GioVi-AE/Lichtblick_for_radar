@@ -11,6 +11,7 @@ const { chromium } = require("playwright");
   p.on("pageerror", (e) => errs.push("pageerror: " + String(e).slice(0, 400)));
   await p.goto(process.argv[2], { waitUntil: "load" });
   await p.waitForTimeout(Number(process.argv[3] || 15000));
+  if (process.argv[5] === "play") { await p.keyboard.press("Space"); await p.waitForTimeout(Number(process.argv[6] || 8000)); }
   await p.screenshot({ path: `/pw/${process.argv[4] || "shot"}.png` });
   console.log(errs.slice(0, 25).join("\n") || "no console errors");
   await b.close();

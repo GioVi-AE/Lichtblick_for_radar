@@ -31,3 +31,15 @@ def test_api_end_to_end(sim_root, tmp_path):
     rep = c.get(f"/runs/{run['id']}/report.html", params={"gate_m": 100})
     assert ctx["carrier"], "carrier should be guessed by name"
     assert rep.status_code == 200 and "Radar KPI report" in rep.text and "<svg" in rep.text
+
+
+def test_timefix_endpoints(sim_root, tmp_path):
+    app = create_app({"raw": sim_root}, tmp_path / "cache", scan_on_start=False)
+    app.state.catalog.scan(force=True)
+    c = TestClient(app)
+    run = c.get("/runs").json()[0]
+    assert run["time_fix"] is None  # nanosecond bag: nothing to fix
+    assert c.post(f"/runs/{run['id']}/timefix").status_code == 409
+    assert c.get(f"/runs/{run['id']}/timefix").json()["state"] == "none"
+    # a time-fixed copy URL resolves back to its run
+    assert c.get("/runs/by-url", params={"url": f"/data/fixed/{run['id']}.mcap"}).json()["id"] == run["id"]

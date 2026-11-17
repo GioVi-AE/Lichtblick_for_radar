@@ -1,5 +1,7 @@
 # KPI definitions
 
+_Author: Giovanni Viglialoro._
+
 Implemented identically in `services/radar-kpi/radar_kpi/kpi.py` (full, whole bag) and
 `extensions/eagle-radar/src/quickKpi.ts` (live, browser-side, grows with playback).
 
@@ -13,8 +15,9 @@ Implemented identically in `services/radar-kpi/radar_kpi/kpi.py` (full, whole ba
 | Radial-velocity error | folded by the ambiguity interval; the sign convention is selected automatically |
 | Time to first detection, longest miss | from the start of the GT/detection overlap |
 | Time offset | lag `τ` minimising the median 3-D error of detections against GT(t+τ), search ±8 s. Reported always, applied only with `auto_offset=true`; a warning is raised if the lag is ≥ 0.3 s and improves the error by > 20 % |
+| Track x/y frame | for `TrackArray`/`DetectionArray` x/y data the frame (NED/ENU/platform-relative) is selected by minimum median horizontal error against GT and reported with a confidence flag (see messages.md) |
 | Tracks | count, mean length, confirmed ratio, continuity, fragmentations (gap > 3 s), ID switches, NEES consistency (χ²₃ 95 % = 7.8147) |
-| RV-map health | frames, saturated frames, timeouts, max age from `RvMapHealth` |
+| RV-map health | frames, saturated frames, timeouts, max age from `RvMapHealth`. Without that topic: derived from the RV-map frames (rate, gaps, peak/mean level; labelled "derived"), saturation n/a |
 
 **Choosing the gate.** The gate is an association radius, not a requirement. With real data from the UKI series the
 detections have CEP95 ≈ 90–125 m, so a 100 m gate counts genuine target detections as false alarms. Always report the

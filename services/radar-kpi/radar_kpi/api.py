@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from . import __version__
 from .analysis import Analyzer
 from .catalog import Catalog
+from .fixtime import TimeFixer
 from .kpi import KpiParams
 from .report import render_report
 
@@ -38,11 +40,13 @@ def create_app(roots: dict[str, Path] | None = None, cache_dir: Path | None = No
     cache_dir = cache_dir or Path(os.environ.get("RADAR_CACHE_DIR", "/cache"))
     catalog = Catalog(roots, cache_dir)
     analyzer = Analyzer(catalog, cache_dir)
+    fixer = TimeFixer(cache_dir)
 
     app = FastAPI(title="radar-kpi", version=__version__)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     app.state.catalog = catalog
     app.state.analyzer = analyzer
+    app.state.fixer = fixer
 
     def _scan(force: bool = False) -> None:
         try:
@@ -63,9 +67,14 @@ def create_app(roots: dict[str, Path] | None = None, cache_dir: Path | None = No
     def health() -> dict:
         return {"status": "ok", "version": __version__, "runs": len(catalog.runs), "scanning": catalog.scanning}
 
+    def _decorate(run) -> dict:
+        d = run.to_dict()
+        d["time_fix"] = fixer.status(run.id) if run.log_time_unit == "s" else None
+        return d
+
     @app.get("/runs")
     def runs() -> list[dict]:
-        return [r.to_dict() for r in catalog.list()]
+        return [_decorate(r) for r in catalog.list()]
 
     @app.post("/rescan")
     def rescan(force: bool = False) -> dict:
@@ -76,13 +85,28 @@ def create_app(roots: dict[str, Path] | None = None, cache_dir: Path | None = No
     @app.get("/runs/by-url")
     def run_by_url(url: str) -> dict:
         run = catalog.by_data_url(url)
+        if run is None:  # a time-fixed copy served from /data/fixed/<run_id>.mcap
+            m = re.search(r"/data/fixed/([0-9a-f]+)\.mcap$", url.split("?", 1)[0])
+            run = catalog.get(m.group(1)) if m else None
         if run is None:
             raise HTTPException(404, f"no run for {url}")
-        return run.to_dict()
+        return _decorate(run)
 
     @app.get("/runs/{rid}")
     def run_detail(rid: str) -> dict:
-        return _run(rid).to_dict()
+        return _decorate(_run(rid))
+
+    @app.get("/runs/{rid}/timefix")
+    def timefix_status(rid: str) -> dict:
+        _run(rid)
+        return fixer.status(rid)
+
+    @app.post("/runs/{rid}/timefix")
+    def timefix_start(rid: str) -> dict:
+        run = _run(rid)
+        if run.log_time_unit != "s":
+            raise HTTPException(409, "this bag already has nanosecond log_time")
+        return fixer.start(rid, catalog.files(run))
 
     @app.get("/runs/{rid}/context")
     def run_context(rid: str) -> dict:

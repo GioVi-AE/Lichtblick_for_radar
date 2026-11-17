@@ -29,7 +29,7 @@ from .adapters import (
 )
 from .catalog import Catalog, Run
 from .geo import lla_to_ned, local_to_ned, ned_to_lla
-from .georef import Anchor, Track, estimate_anchor, estimate_time_offset
+from .georef import Anchor, Track, estimate_anchor, estimate_time_offset, local_xy_to_ned, select_local_xy_frame
 from .kpi import (
     KpiParams,
     detection_kpi,
@@ -48,6 +48,7 @@ from .mcap_io import (
     KIND_ODOM_GT,
     KIND_RADAR_DET,
     KIND_RV_HEALTH,
+    KIND_RVMAP,
     KIND_TRACK_ARRAY,
     KIND_TRACK_KPI,
     summarize_bag,
@@ -75,6 +76,9 @@ class Loaded:
         self.plat_ned: np.ndarray | None = None
         self.warnings: list[str] = []
         self.sources: dict = {}
+        self.target_cands: dict[str, Track] = {}
+        self.tracks_ned: np.ndarray | None = None
+        self.local_xy: dict | None = None
 
 
 _CARRIER_NAME = re.compile(r"carrier|platform|ego|own_?ship|radar", re.I)
@@ -150,6 +154,13 @@ class Analyzer:
         stat_topics = [(t.name, t.type) for t in topics if t.kind in (KIND_TRACK_KPI, KIND_RV_HEALTH)]
         if stat_topics:
             ld.status = read_status(files, stat_topics)
+        rv_topics = [t for t in topics if t.kind == KIND_RVMAP and t.count > 0]
+        if rv_topics and not any(t.kind == KIND_RV_HEALTH for t in topics):
+            from .adapters import read_rvmap_stats
+            derived = read_rvmap_stats(files, rv_topics[0].name, rv_topics[0].type)
+            if derived is not None:
+                ld.status = ld.status or Status()
+                ld.status.rv_derived = derived
         # --- local ground truth (messages)
         gt_topics = [(t.name, t.type) for t in topics if t.kind in (KIND_GROUND_TRUTH, KIND_ODOM_GT) and t.count > 0]
         if gt_topics:
@@ -167,7 +178,60 @@ class Analyzer:
         self._load_navsat(ld, sources)
 
         self._georeference(ld)
+        self._resolve_local_xy(ld)
         return ld
+
+    # ------------------------------------------------------------------------- bare x/y frames
+    def _resolve_local_xy(self, ld: Loaded) -> None:
+        """eagle_radar_msgs Track/Detection x/y live in an unspecified "radar_frame": let the ground truth pick the axes."""
+        det, trk = ld.det, ld.tracks
+        need_det = det is not None and det.local is not None and det.platform_local is None and det.lla is None
+        need_trk = trk is not None and trk.local is not None and trk.lla is None
+        if not (need_det or need_trk):
+            return
+        carrier = ld.carrier
+        if ld.anchor is None:
+            if carrier is None or len(carrier) == 0:
+                ld.warnings.append("Track/Detection x/y are in an unspecified radar frame and no carrier NavSatFix is available: "
+                                   "they cannot be georeferenced.")
+                return
+            ld.anchor = Anchor(float(carrier.lat[0]), float(carrier.lon[0]), float(carrier.alt[0]), frame="NED",
+                               residual_std_m=None, source="carrier_first_fix")
+        anchor = ld.anchor.as_tuple()
+        gts = {ld.target_topic: ld.target} if ld.target is not None and ld.target_topic else dict(ld.target_cands)
+        t_src, xy_src, what = (det.t, det.local, "detections") if need_det else (trk.t, trk.local, "tracks")  # type: ignore[union-attr]
+        sel = select_local_xy_frame(t_src, xy_src, anchor, carrier, gts) if gts else None
+        if sel is None:
+            frame = "NED"
+            ld.warnings.append(f"Frame of the {what} x/y is unverified (no ground truth to compare with): assuming NED (x=N, y=E). "
+                               "The map offers other axis conventions.")
+        else:
+            frame = sel["selected"]
+            sel["source"] = what
+            ld.local_xy = sel
+            scores = ", ".join(f"{k} {v:.0f} m" for k, v in sel["median_horiz_m"].items())
+            if not sel["confident"]:
+                ld.warnings.append(f"Frame of the {what} x/y is ambiguous (median horizontal error per hypothesis: {scores}); using {frame}.")
+            elif min(sel["median_horiz_m"].values()) > 300:
+                ld.warnings.append(f"The {what} x/y do not match the ground truth under any frame hypothesis ({scores}).")
+            if ld.target is None:
+                ld.target_topic, ld.target = sel["target"], gts[sel["target"]]
+        ld.sources["local_xy_frame"] = frame
+        if need_det:
+            assert det is not None
+            ned = local_xy_to_ned(frame, det.t, det.local, anchor, carrier)
+            if ld.target is not None:
+                glat, glon, galt, ok = ld.target.at(det.t, 5.0)
+                gz = lla_to_ned(anchor, glat, glon, galt)[:, 2]
+                ned[:, 2] = np.where(ok, gz, 0.0)
+                ld.warnings.append("Detections have no height: association and error statistics are horizontal (vertical error is zero by construction).")
+            ld.det_ned = ned
+            if carrier is not None:
+                plat = local_xy_to_ned("PLATFORM_NED", det.t, np.zeros((len(det), 2)), anchor, carrier)
+                ld.plat_ned = plat
+        if need_trk:
+            assert trk is not None
+            ld.tracks_ned = local_xy_to_ned(frame, trk.t, trk.local, anchor, carrier, z=trk.local[:, 2] if trk.has_z else None)
 
     def _load_navsat(self, ld: Loaded, sources) -> None:
         for r, files, topics in sources:
@@ -193,10 +257,10 @@ class Analyzer:
     def _georeference(self, ld: Loaded) -> None:
         det = ld.det
         cands: dict[str, Track] = ld.sources.pop("_target_candidates", {})
+        ld.target_cands = cands
         if det is None:
-            ld.warnings.append("No radar detection topic found in this run.")
-            if cands:
-                ld.target_topic, ld.target = next(iter(cands.items()))
+            if ld.tracks is None:
+                ld.warnings.append("No radar detection or track topic found in this run.")
             return
         # geo-native detections (CVDetection): anchor = first detection
         if det.lla is not None:
@@ -223,7 +287,7 @@ class Analyzer:
                 a = anchor.as_tuple()
                 ld.det_ned = local_to_ned(anchor.frame, det.local)
                 ld.plat_ned = local_to_ned(anchor.frame, det.platform_local)
-        elif det.local is not None:
+        elif det.local is not None and det.platform_local is not None:
             ld.warnings.append("Radar-local detections but no radar-platform NavSatFix (not in this bag nor in a paired raw bag): "
                                "cannot georeference; only detection statistics are available.")
         if det.local is not None and det.platform_local is not None and ld.plat_ned is None and ld.anchor is not None:
@@ -276,6 +340,7 @@ class Analyzer:
             },
             "carrier": pack(ld.carrier),
             "target": pack(ld.target),
+            "xy_frame": None if ld.local_xy is None else {"selected": ld.local_xy["selected"], "confident": ld.local_xy["confident"]},
             "carrier_topic": ld.carrier_topic,
             "target_topic": ld.target_topic,
             "warnings": ld.warnings,
@@ -373,7 +438,9 @@ class Analyzer:
             anchor_t = ld.anchor.as_tuple() if ld.anchor else None
             if anchor_t is None and ld.tracks.lla is not None:
                 anchor_t = tuple(float(x) for x in ld.tracks.lla[0])
-            result["tracks"] = track_kpi(ld.tracks, anchor_t, ld.frame, ld.target, ld.status, params)
+            result["tracks"] = track_kpi(ld.tracks, anchor_t, ld.frame, ld.target, ld.status, params, local_ned=ld.tracks_ned)
+            if ld.local_xy is not None and result["tracks"] is not None:
+                result["tracks"]["xy_frame"] = ld.local_xy
         result["health"] = health_kpi(ld.status)
         return result, arrays
 

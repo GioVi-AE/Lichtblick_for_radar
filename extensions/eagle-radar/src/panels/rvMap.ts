@@ -8,14 +8,18 @@ import { h, ramp, rootEl } from "../ui";
 
 interface Config {
   rangeAxis: "x" | "y";
-  /** true: index = range * nVel + vel (range-major); false: index = vel * nRange + range */
+  /**
+   * false (default, verified on real GeoRegRVMap data, see docs/radar/messages.md):
+   *   index = vel * nRange + range  (matrix of nVelocities rows x nRanges columns, row-major)
+   * true: index = range * nVel + vel (kept only as a diagnostic override)
+   */
   rangeMajor: boolean;
   scale: "log" | "linear";
   pLow: number;
   pHigh: number;
 }
 
-const DEFAULTS: Config = { rangeAxis: "x", rangeMajor: true, scale: "log", pLow: 5, pHigh: 99.8 };
+const DEFAULTS: Config = { rangeAxis: "x", rangeMajor: false, scale: "log", pLow: 5, pHigh: 99.8 };
 
 const RV_SCHEMAS = ["GeoRegRVMap", "RVMap"];
 const HEALTH_SCHEMAS = ["RvMapHealth", "TrackKpiStatus", "RadarStatus", "NodeStatus"];
@@ -54,6 +58,16 @@ export function toRvFrame(schema: string, m: any): RvFrame | undefined {
     };
   }
   return undefined;
+}
+
+/** Linear index of the (range bin, velocity bin) cell in the flat RV-map array. */
+export function rvIndex(rangeMajor: boolean, nR: number, nV: number, r: number, v: number): number {
+  return rangeMajor ? r * nV + v : v * nR + r;
+}
+
+/** Velocity [m/s] of velocity bin v (positive = away, zero at the zero-Doppler bin). */
+export function binVelocity(frame: { dv: number; zeroDoppler: number }, v: number): number {
+  return (v - frame.zeroDoppler) * frame.dv;
 }
 
 export function percentileOf(values: ArrayLike<number>, p: number, stride = 1): number {
@@ -125,7 +139,7 @@ export function initRvMap(context: PanelExtensionContext): () => void {
       return;
     }
     const { nR, nV, values } = frame;
-    const idx = (r: number, v: number) => (cfg.rangeMajor ? r * nV + v : v * nR + r);
+    const idx = (r: number, v: number) => rvIndex(cfg.rangeMajor, nR, nV, r, v);
     const tf = (x: number) => (cfg.scale === "log" ? Math.log10(1 + Math.max(0, x)) : x);
     const stride = Math.max(1, Math.floor(values.length / 5000));
     const lo = tf(percentileOf(values, cfg.pLow, stride));
@@ -206,7 +220,7 @@ export function initRvMap(context: PanelExtensionContext): () => void {
           defaultExpansionState: "expanded",
           fields: {
             rangeAxis: { label: "Range axis", input: "select", value: cfg.rangeAxis, options: [{ label: "Horizontal", value: "x" }, { label: "Vertical", value: "y" }] },
-            rangeMajor: { label: "Index order", input: "select", value: cfg.rangeMajor ? "range" : "vel", options: [{ label: "range-major (r*nVel+v)", value: "range" }, { label: "velocity-major (v*nRange+r)", value: "vel" }] },
+            rangeMajor: { label: "Index order", input: "select", value: cfg.rangeMajor ? "range" : "vel", options: [{ label: "range-major (r*nVel+v)", value: "range" }, { label: "velocity-major (v*nRange+r) – verified", value: "vel" }] },
             scale: { label: "Scale", input: "select", value: cfg.scale, options: [{ label: "log10(1+x)", value: "log" }, { label: "linear", value: "linear" }] },
             pLow: { label: "Low percentile", input: "number", value: cfg.pLow, min: 0, max: 99, step: 1 },
             pHigh: { label: "High percentile", input: "number", value: cfg.pHigh, min: 50, max: 100, step: 0.1 },

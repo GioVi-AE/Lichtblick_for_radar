@@ -21,5 +21,6 @@ if [[ "$n" -gt 0 ]]; then
   [[ "$code" == "206" ]] || fail "data server range request returned $code"
   curl -fsS "$BASE/kpi/runs/$id/kpi" | python3 -c 'import json,sys; k=json.load(sys.stdin); assert k["detection"]["count"]>0; print("kpi mode:", k["mode"], "Pd:", k["detection"].get("pd"))'
   [[ "$(curl -fsS "$BASE/kpi/runs/$id/report.html")" == *"Radar KPI report"* ]] || fail "report"
+  curl -fsS "$BASE/kpi/runs/$id/timefix" | grep -q state || fail "timefix endpoint"
 fi
 echo "smoke OK"

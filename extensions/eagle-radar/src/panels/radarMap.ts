@@ -7,7 +7,7 @@ import leafletCss from "leaflet/dist/leaflet.css";
 
 import { setSharedAnchor } from "../converters";
 import { llaToNed } from "../geo";
-import { Anchor, TimedTrack } from "../georef";
+import { Anchor, TimedTrack, XyFrame } from "../georef";
 import { KpiClient, RunContext, currentDataUrl } from "../kpiApi";
 import { MessageEvent, PanelExtensionContext, RenderState, SettingsTreeAction, Subscription } from "../lichtblick";
 import { DEFAULT_QUICK_PARAMS } from "../quickKpi";
@@ -36,6 +36,7 @@ interface Config {
   manualLon: number;
   manualAlt: number;
   manualFrame: "NED" | "ENU";
+  xyFrame: "auto" | XyFrame;
   overlayUrl: string;
   followCarrier: boolean;
   roles: Record<string, Role>;
@@ -60,6 +61,7 @@ const DEFAULTS: Config = {
   manualLon: 0,
   manualAlt: 0,
   manualFrame: "NED",
+  xyFrame: "auto",
   overlayUrl: "",
   followCarrier: false,
   roles: {},
@@ -167,6 +169,7 @@ export function initRadarMap(context: PanelExtensionContext): () => void {
       store.manualAnchor = undefined;
     }
     setSharedAnchor(store.anchor);
+    store.xyFrame = cfg.xyFrame;
     // Re-ingest everything with the new anchor.
     processed = 0;
     store.reset();
@@ -185,6 +188,7 @@ export function initRadarMap(context: PanelExtensionContext): () => void {
     store.targetSvc.clear();
     for (const [t, lat, lon, alt] of c.carrier) store.carrierSvc.push({ t, lat, lon, alt });
     for (const [t, lat, lon, alt] of c.target) store.targetSvc.push({ t, lat, lon, alt });
+    store.serviceXyFrame = (c.xy_frame?.selected as XyFrame | undefined) ?? undefined;
     if (c.anchor) {
       const a: Anchor = {
         lat: c.anchor.lat, lon: c.anchor.lon, alt: c.anchor.alt, frame: c.anchor.frame,
@@ -223,6 +227,7 @@ export function initRadarMap(context: PanelExtensionContext): () => void {
     carrierNs = detectCarrierNamespace(rs.topics ?? []);
     store.carrierNs = carrierNs;
     store.roles = cfg.roles;
+    store.xyFrame = cfg.xyFrame;
     const subs: Subscription[] = [];
     for (const t of topics) {
       const kind = classifySchema(t.schemaName, t.name);
@@ -429,6 +434,9 @@ export function initRadarMap(context: PanelExtensionContext): () => void {
     lines.push(`t = ${tCur.toFixed(2)} s   (trail ${cfg.trailSec}s)`);
     lines.push(`detections: ${visible.length} shown / ${st.detections} total   tracks: ${trackCount}/${st.tracks}`);
     if (st.pendingLocal > 0 && !st.anchor) lines.push(`⚠ ${st.pendingLocal} local-frame samples waiting for georeference (no platform NavSat / anchor)`);
+    const xy = store.xyInfo;
+    if (store.pendingXy > 0) lines.push(`⚠ ${store.pendingXy} Track/Detection x/y samples undecided: waiting for ground truth, or choose the axes in settings`);
+    else if (xy) lines.push(`x/y axes: ${xy.frame} (${xy.origin}${xy.confident ? "" : ", ambiguous"})`);
     if (st.anchor) lines.push(`georef: ${st.anchor.frame} anchor ${st.anchor.lat.toFixed(5)}, ${st.anchor.lon.toFixed(5)} [${st.anchor.source}${st.anchor.residualStd != undefined ? ", σ=" + st.anchor.residualStd.toFixed(1) + " m" : ""}]`);
     if (gtPos && carrierPos) {
       const r = llaToNed(carrierPos, gtPos);
@@ -501,7 +509,7 @@ export function initRadarMap(context: PanelExtensionContext): () => void {
         persist();
         if (["tileMode", "customTileUrl"].includes(key)) applyTiles();
         if (key === "overlayUrl") void applyOverlay();
-        if (["anchorMode", "manualLat", "manualLon", "manualAlt", "manualFrame"].includes(key)) applyAnchorConfig();
+        if (["anchorMode", "manualLat", "manualLon", "manualAlt", "manualFrame", "xyFrame"].includes(key)) applyAnchorConfig();
         staticSig = "";
         schedule();
         updateSettings(topics);
@@ -540,6 +548,18 @@ export function initRadarMap(context: PanelExtensionContext): () => void {
             manualLat: { label: "Anchor lat", input: "number", value: cfg.manualLat, step: 0.00001, precision: 6 },
             manualLon: { label: "Anchor lon", input: "number", value: cfg.manualLon, step: 0.00001, precision: 6 },
             manualAlt: { label: "Anchor alt (m)", input: "number", value: cfg.manualAlt, step: 1 },
+            xyFrame: {
+              label: "Track/Detection x/y axes",
+              input: "select",
+              value: cfg.xyFrame,
+              options: [
+                { label: "Auto (service / ground truth)", value: "auto" },
+                { label: "NED world (x=N,y=E)", value: "NED" },
+                { label: "ENU world (x=E,y=N)", value: "ENU" },
+                { label: "Platform-relative NED", value: "PLATFORM_NED" },
+                { label: "Platform-relative ENU", value: "PLATFORM_ENU" },
+              ],
+            },
             manualFrame: { label: "Local frame", input: "select", value: cfg.manualFrame, options: [{ label: "NED (x=N,y=E,z=Down)", value: "NED" }, { label: "ENU (x=E,y=N,z=Up)", value: "ENU" }] },
           },
         },

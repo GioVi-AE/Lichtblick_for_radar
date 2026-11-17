@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Eagle-Proprietary
 // Run browser: catalogue of the bags indexed by the radar-kpi service; opens a run in Lichtblick.
 
-import { KpiClient, RunInfo, currentDataUrl, lichtblickOpenUrl } from "../kpiApi";
+import { KpiClient, RunInfo, TimeFixStatus, currentDataUrl, lichtblickOpenUrl } from "../kpiApi";
 import { PanelExtensionContext } from "../lichtblick";
 import { fmt, h, rootEl } from "../ui";
 
@@ -45,6 +45,44 @@ export function initRunBrowser(context: PanelExtensionContext): () => void {
     return h("span", { class: "er-chip " + (on ? "er-good" : "er-muted"), title }, text);
   }
 
+  /** Runs with log_time in seconds open a nanosecond-time copy (so the playback clock shows the real date). */
+  function openButton(r: RunInfo): HTMLElement {
+    const tf = r.time_fix;
+    if (!tf) return h("button", { class: "er-btn", onclick: () => { globalThis.location.href = lichtblickOpenUrl(r); } }, "Open");
+    if (tf.state === "done" && tf.url) {
+      return h("button", { class: "er-btn", title: "time-corrected copy (log_time from payload timestamps)", onclick: () => { globalThis.location.href = lichtblickOpenUrl(r, tf.url); } }, "Open");
+    }
+    if (tf.state === "running") return h("button", { class: "er-btn", disabled: "true" }, `fixing ${(100 * (tf.progress ?? 0)).toFixed(0)} %`);
+    return h("button", {
+      class: "er-btn",
+      title: tf.state === "error" ? `previous attempt failed: ${tf.error}` : "log_time of this bag is in seconds. Creates a corrected copy (about half the size) so the playback clock shows the real time.",
+      onclick: () => void fixTime(r),
+    }, tf.state === "error" ? "Retry time fix" : "Fix time + open");
+  }
+
+  let poller: ReturnType<typeof setInterval> | undefined;
+  async function fixTime(r: RunInfo): Promise<void> {
+    try {
+      r.time_fix = await client.startTimeFix(r.id);
+      render();
+      globalThis.clearInterval(poller);
+      poller = globalThis.setInterval(() => {
+        void (async () => {
+          const running = runs.filter((x) => x.time_fix?.state === "running");
+          if (running.length === 0) { globalThis.clearInterval(poller); return; }
+          for (const x of running) {
+            const st: TimeFixStatus = await client.timeFixStatus(x.id);
+            x.time_fix = st;
+            if (st.state === "done" && st.url && x.id === r.id) globalThis.location.href = lichtblickOpenUrl(x, st.url);
+          }
+          render();
+        })();
+      }, 1500);
+    } catch (e) {
+      status.textContent = (e as Error).message;
+    }
+  }
+
   function render(): void {
     cfg.search = search.value;
     cfg.root = rootSel.value;
@@ -63,7 +101,7 @@ export function initRunBrowser(context: PanelExtensionContext): () => void {
     const cols: [string, string][] = [["name", "Run"], ["root", "Root"], ["duration_s", "Dur"], ["size_bytes", "Size"], ["", "Data"], ["", ""]];
     const head = h("tr", {}, ...cols.map(([k, t]) => h("th", { onclick: () => { if (!k) return; if (cfg.sort === k) cfg.desc = !cfg.desc; else { cfg.sort = k; cfg.desc = false; } render(); } }, t)));
     const rows = list.map((r) => {
-      const isCurrent = current !== undefined && current === r.data_url;
+      const isCurrent = current !== undefined && (current === r.data_url || current === r.time_fix?.url);
       return h("tr", { class: isCurrent ? "sel" : "", title: r.mcap + (r.notes.length ? "\n" + r.notes.join("\n") : "") },
         h("td", {}, r.name, r.log_time_unit === "s" ? h("span", { class: "er-chip er-warn", title: "log_time is in seconds (not ns): playback clock is non-standard" }, "t[s]") : undefined),
         h("td", {}, r.root),
@@ -72,7 +110,7 @@ export function initRunBrowser(context: PanelExtensionContext): () => void {
         h("td", {}, flag(r.has_detections, "DET", "radar detections"), flag(r.has_tracks, "TRK", "tracks"),
           flag(r.has_ground_truth, "GT", r.gt_source ?? "ground truth"), flag(r.has_carrier, "NAV", "radar platform NavSat"), flag(r.has_rvmap, "RV", "RV map"),
           r.paired_with ? h("span", { class: "er-chip", title: "paired with raw bag " + r.paired_with }, "pair") : undefined),
-        h("td", {}, h("button", { class: "er-btn", onclick: () => { globalThis.location.href = lichtblickOpenUrl(r); } }, "Open")));
+        h("td", {}, openButton(r)));
     });
     body.replaceChildren(h("table", { class: "er-table" }, h("thead", {}, head), h("tbody", {}, ...rows)));
     status.textContent = `${list.length}/${runs.length} runs`;
@@ -98,5 +136,8 @@ export function initRunBrowser(context: PanelExtensionContext): () => void {
   gt.addEventListener("change", render);
   det.addEventListener("change", render);
   void reload();
-  return () => root.remove();
+  return () => {
+    globalThis.clearInterval(poller);
+    root.remove();
+  };
 }

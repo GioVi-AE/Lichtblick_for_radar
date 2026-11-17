@@ -1,5 +1,7 @@
 # Architecture
 
+_Author: Giovanni Viglialoro._
+
 ```
 ┌────────────── web container (Caddy :8080) ───────────────┐      ┌── radar-kpi (FastAPI :8090) ──┐
 │ Lichtblick web build + default layout (placeholder swap) │ /kpi │ catalogue  ← bag folders (ro)  │
@@ -24,5 +26,5 @@
   `rosbag2_YYYY_MM_DD-HH_MM_SS` token; the target NavSatFix of the raw bag is the ground truth (target chosen by minimum
   median distance to the detections).
 * **Clock quirk**: some processed bags store seconds in `log_time` instead of nanoseconds. The catalogue flags them
-  (`log_time_unit = "s"`) and panels map the playback cursor to payload time.
+  (`log_time_unit = "s"`) and panels map the playback cursor to payload time, and the Run browser can create a time-corrected copy (`/data/fixed/`).
 * **Data is never copied**: bags are bind-mounted read-only into `radar-kpi` and `data-server`.

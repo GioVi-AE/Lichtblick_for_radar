@@ -196,7 +196,7 @@ def analyse_bag(root: str, root_dir: Path, bag: Path) -> Run | None:
                     run.notes.append(f"{odo[0].name} contains only zero positions (no usable ground truth)")
     except Exception as exc:  # noqa: BLE001
         log.warning("gt probe failed for %s: %s", bag, exc)
-    if not run.has_ground_truth and targets and (run.carrier_ns or cv_topics):
+    if not run.has_ground_truth and targets and (run.carrier_ns or cv_topics or run.has_detections or run.has_tracks):
         run.has_ground_truth, run.gt_source = True, f"NavSatFix:{targets[0].name}"
 
     m = _TOKEN.search(rel_bag)

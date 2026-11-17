@@ -15,7 +15,7 @@ export interface Anchor extends Lla {
   frame: LocalFrame;
   /** Std-dev (m) of the horizontal residual after anchoring; undefined for manual anchors. */
   residualStd?: number;
-  source: "auto" | "manual" | "service";
+  source: "auto" | "manual" | "service" | "carrier_first_fix";
 }
 
 export interface TimedLla extends Lla {
@@ -32,6 +32,65 @@ export interface LocalSample {
 /** Converts a local sample (frame axes) into NED about the anchor. */
 export function localToNed(frame: LocalFrame, x: number, y: number, z: number): Ned {
   return frame === "NED" ? { n: x, e: y, d: z } : { n: y, e: x, d: -z };
+}
+
+/**
+ * eagle_radar Track/Detection messages carry bare x/y in an unspecified "radar_frame". The axes are therefore a
+ * hypothesis that the ground truth decides (mirrors services/radar-kpi georef.select_local_xy_frame):
+ *   NED: (x=N, y=E)   ENU: (x=E, y=N)   PLATFORM_*: same axes, relative to the radar carrier at time t.
+ */
+export type XyFrame = "NED" | "ENU" | "PLATFORM_NED" | "PLATFORM_ENU";
+export const XY_FRAMES: readonly XyFrame[] = ["NED", "ENU", "PLATFORM_NED", "PLATFORM_ENU"];
+
+/** NED about `anchor` of a bare x/y(/z) sample; undefined if a platform frame has no carrier fix at t. */
+export function xyToNed(frame: XyFrame, anchor: Lla, s: LocalSample, carrier: TimedTrack | undefined): Ned | undefined {
+  const isNed = frame.endsWith("NED");
+  let n = isNed ? s.x : s.y;
+  let e = isNed ? s.y : s.x;
+  let d = isNed ? s.z : -s.z;
+  if (frame.startsWith("PLATFORM")) {
+    const c = carrier?.at(s.t, 5);
+    if (!c) return undefined;
+    const base = llaToNed(anchor, c);
+    n += base.n;
+    e += base.e;
+    d += base.d;
+  }
+  return { n, e, d };
+}
+
+export interface XySelection {
+  selected: XyFrame;
+  medianHorizM: Partial<Record<XyFrame, number>>;
+  confident: boolean;
+}
+
+export function selectXyFrame(samples: readonly LocalSample[], anchor: Lla, carrier: TimedTrack | undefined, gts: readonly TimedTrack[]): XySelection | undefined {
+  if (samples.length === 0 || gts.length === 0) return undefined;
+  const stride = Math.max(1, Math.floor(samples.length / 2000));
+  const scores: Partial<Record<XyFrame, number>> = {};
+  for (const fr of XY_FRAMES) {
+    for (const gt of gts) {
+      const errs: number[] = [];
+      for (let i = 0; i < samples.length; i += stride) {
+        const s = samples[i]!;
+        const g = gt.at(s.t, 5);
+        const ned = xyToNed(fr, anchor, s, carrier);
+        if (!g || !ned) continue;
+        const gn = llaToNed(anchor, g);
+        errs.push(Math.hypot(ned.n - gn.n, ned.e - gn.e));
+      }
+      if (errs.length < 3) continue;
+      errs.sort((a, b) => a - b);
+      const med = errs[Math.floor(errs.length / 2)]!;
+      if (med < (scores[fr] ?? Infinity)) scores[fr] = med;
+    }
+  }
+  const entries = Object.entries(scores) as [XyFrame, number][];
+  if (entries.length === 0) return undefined;
+  entries.sort((a, b) => a[1] - b[1]);
+  const [best, second] = [entries[0]!, entries[1]];
+  return { selected: best[0], medianHorizM: scores, confident: !second || best[1] < 0.7 * second[1] };
 }
 
 export function localToLla(anchor: Anchor, x: number, y: number, z: number): Lla {

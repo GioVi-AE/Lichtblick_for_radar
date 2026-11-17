@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { percentileOf, toRvFrame } from "../src/panels/rvMap";
+import { binVelocity, percentileOf, rvIndex, toRvFrame } from "../src/panels/rvMap";
 
 test("toRvFrame decodes GeoRegRVMap and rejects inconsistent sizes", () => {
   const ok = toRvFrame("multi_sensor_msgs/msg/GeoRegRVMap", {
@@ -20,4 +20,13 @@ test("toRvFrame decodes eagle_radar RVMap", () => {
 
 test("percentileOf", () => {
   assert.equal(percentileOf([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50), 6);
+});
+
+test("default layout is velocity-major (rows = velocity bins), as verified on real GeoRegRVMap data", () => {
+  // A target at range bin 5 / velocity bin 3 in a 10-range x 4-velocity map stored row-major by velocity.
+  const nR = 10, nV = 4, values = new Uint32Array(nR * nV);
+  values[3 * nR + 5] = 99;
+  assert.equal(values[rvIndex(false, nR, nV, 5, 3)], 99);
+  assert.notEqual(values[rvIndex(true, nR, nV, 5, 3)], 99);
+  assert.equal(binVelocity({ dv: 0.5, zeroDoppler: 2 }, 3), 0.5);
 });

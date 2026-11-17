@@ -2,10 +2,10 @@
 """Synthetic eagle_radar_msgs bag generator.
 
 Produces an MCAP (ROS 2 / CDR) with
-  * /radar/detections   eagle_radar_msgs/msg/CVDetection  (object_id empty)
-  * /radar/tracks       eagle_radar_msgs/msg/CVDetection  (object_id = track id)
-  * /radar/track_kpi    eagle_radar_msgs/msg/TrackKpiStatus
-  * /radar/rvmap_health eagle_radar_msgs/msg/RvMapHealth
+  * /radar/detections   eagle_radar/msg/CVDetection  (object_id empty)
+  * /radar/tracks       eagle_radar/msg/CVDetection  (object_id = track id)
+  * /radar/track_kpi    eagle_radar/msg/TrackKpiStatus
+  * /radar/rvmap_health eagle_radar/msg/RvMapHealth
   * /target/mavros/global_position/global  sensor_msgs/msg/NavSatFix  (ground truth)
   * /carrier/mavros/global_position/global sensor_msgs/msg/NavSatFix
 so that the KPI engine, the API and the UI can be exercised without real data. The scenario
@@ -131,6 +131,75 @@ uint16 service
 """
 
 
+DETECTION_ARRAY = """std_msgs/Header header
+eagle_radar/Detection[] detections
+================================================================================
+MSG: eagle_radar/Detection
+float64 x
+float64 y
+float64 amplitude
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+TRACK_ARRAY = """std_msgs/Header header
+eagle_radar/Track[] tracks
+================================================================================
+MSG: eagle_radar/Track
+uint32 id
+float64 x
+float64 y
+float64 vx
+float64 vy
+string status
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+
+TRACK_ARRAY_RICH = """std_msgs/Header header
+eagle_radar/Track[] tracks
+builtin_interfaces/Time timestamp
+================================================================================
+MSG: eagle_radar/Track
+std_msgs/Header header
+uint32 track_id
+string track_type
+float32[3] position
+float32[3] velocity
+float32[3] acceleration
+float32 range
+float32 azimuth
+float32 elevation
+float32 confidence
+uint32 age_frames
+uint32 hit_count
+uint8 classification
+float32 classification_confidence
+builtin_interfaces/Time timestamp
+================================================================================
+MSG: std_msgs/Header
+builtin_interfaces/Time stamp
+string frame_id
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+
 @dataclass
 class Scenario:
     seconds: float = 120.0
@@ -182,9 +251,9 @@ def generate(path: Path, sc: Scenario | None = None) -> dict:
     stats = {"scenario": asdict(sc), "n_det": 0, "n_true": 0, "n_clutter": 0, "bins_detected": set(), "n_bins": int(sc.seconds)}
     with open(path, "wb") as fh:
         w = Writer(fh)
-        s_cv = w.register_msgdef("eagle_radar_msgs/msg/CVDetection", CV_DETECTION)
-        s_kpi = w.register_msgdef("eagle_radar_msgs/msg/TrackKpiStatus", TRACK_KPI)
-        s_rv = w.register_msgdef("eagle_radar_msgs/msg/RvMapHealth", RV_HEALTH)
+        s_cv = w.register_msgdef("eagle_radar/msg/CVDetection", CV_DETECTION)
+        s_kpi = w.register_msgdef("eagle_radar/msg/TrackKpiStatus", TRACK_KPI)
+        s_rv = w.register_msgdef("eagle_radar/msg/RvMapHealth", RV_HEALTH)
         s_nav = w.register_msgdef("sensor_msgs/msg/NavSatFix", NAVSAT)
 
         def navsat(topic: str, t: float, pos: np.ndarray) -> None:
@@ -254,6 +323,84 @@ def generate(path: Path, sc: Scenario | None = None) -> dict:
         w.finish()
 
     stats["bins_detected"] = len(stats["bins_detected"])
+    return stats
+
+
+def generate_reveal(path: Path, sc: Scenario | None = None, frame: str = "PLATFORM_ENU", rich_tracks: bool = False) -> dict:
+    """eagle_reveal-style bag: DetectionArray + TrackArray with x/y in an *unspecified* radar frame.
+
+    `frame` (NED | ENU | PLATFORM_NED | PLATFORM_ENU) is the axis convention the x/y really use, so tests can check
+    that the KPI service recovers it from the ground truth. The carrier flies a straight path away from its first fix.
+    """
+    sc = sc or Scenario()
+    rng = np.random.default_rng(sc.seed)
+    a = sc.anchor
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def lla(ned: np.ndarray) -> np.ndarray:
+        lat, lon, alt = ned_to_lla(a, np.atleast_2d(ned))
+        return np.stack([lat, lon, alt], axis=1)
+
+    def carrier_ned(t_rel: float) -> np.ndarray:
+        return np.array([2.0 * t_rel, 0.8 * t_rel, -50.0])
+
+    def to_frame(world: np.ndarray, t_rel: float) -> tuple[float, float]:
+        rel = world - carrier_ned(t_rel) if frame.startswith("PLATFORM") else world
+        return (float(rel[0]), float(rel[1])) if frame.endswith("NED") else (float(rel[1]), float(rel[0]))
+
+    stats = {"scenario": asdict(sc), "frame": frame, "n_det": 0}
+    with open(path, "wb") as fh:
+        w = Writer(fh)
+        s_nav = w.register_msgdef("sensor_msgs/msg/NavSatFix", NAVSAT)
+        s_da = w.register_msgdef("eagle_radar/msg/DetectionArray", DETECTION_ARRAY)
+        s_ta = w.register_msgdef("eagle_radar/msg/TrackArray", TRACK_ARRAY_RICH if rich_tracks else TRACK_ARRAY)
+
+        def navsat(topic: str, t: float, pos: np.ndarray) -> None:
+            w.write_message(topic=topic, schema=s_nav, message={
+                "header": _header(t, "gps"), "status": {"status": 0, "service": 1},
+                "latitude": float(pos[0]), "longitude": float(pos[1]), "altitude": float(pos[2]),
+                "position_covariance": [0.0] * 9, "position_covariance_type": 0,
+            }, log_time=int(t * 1e9), publish_time=int(t * 1e9))
+
+        for t_rel in np.arange(0.0, sc.seconds + 1e-9, 0.1):
+            t = sc.start_time + t_rel
+            world = carrier_ned(t_rel) + target_ned(t_rel, sc)[0]
+            navsat("/target/mavros/global_position/global", t, lla(world)[0])
+            navsat("/carrier/mavros/global_position/global", t, lla(carrier_ned(t_rel))[0])
+        for k in range(int(sc.seconds * sc.scan_hz)):
+            t_rel = k / sc.scan_hz
+            t = sc.start_time + t_rel
+            world = carrier_ned(t_rel) + target_ned(t_rel, sc)[0]
+            dets = []
+            if rng.random() < sc.p_detect:
+                noisy = world + np.array([rng.normal(0, sc.sigma_h_m), rng.normal(0, sc.sigma_h_m), 0.0])
+                x, y = to_frame(noisy, t_rel)
+                dets.append({"x": x, "y": y, "amplitude": 30.0})
+                stats["n_det"] += 1
+            for _ in range(rng.poisson(sc.clutter_per_scan)):
+                far = world + np.array([rng.uniform(300, 2500), rng.uniform(-1500, 1500), 0.0])
+                x, y = to_frame(far, t_rel)
+                dets.append({"x": x, "y": y, "amplitude": 12.0})
+            w.write_message(topic="/eagle_reveal/detections", schema=s_da,
+                            message={"header": _header(t, "radar_frame"), "detections": dets},
+                            log_time=int(t * 1e9), publish_time=int(t * 1e9))
+            if dets and rich_tracks:
+                x, y = dets[0]["x"], dets[0]["y"]
+                stamp = _stamp(t)
+                tr = {"header": _header(t, "radar_frame"), "track_id": 1, "track_type": "uav", "position": [x, y, 0.0],
+                      "velocity": [0.0] * 3, "acceleration": [0.0] * 3, "range": 0.0, "azimuth": 0.0, "elevation": 0.0,
+                      "confidence": 0.9, "age_frames": k, "hit_count": k, "classification": 0,
+                      "classification_confidence": 0.0, "timestamp": stamp}
+                w.write_message(topic="/eagle_reveal/tracks", schema=s_ta,
+                                message={"header": _header(t, "radar_frame"), "tracks": [tr], "timestamp": stamp},
+                                log_time=int(t * 1e9), publish_time=int(t * 1e9))
+            elif dets:
+                x, y = dets[0]["x"], dets[0]["y"]
+                w.write_message(topic="/eagle_reveal/tracks", schema=s_ta, message={
+                    "header": _header(t, "radar_frame"),
+                    "tracks": [{"id": 1, "x": x, "y": y, "vx": 0.0, "vy": 0.0, "status": "CONFIRMED"}]},
+                    log_time=int(t * 1e9), publish_time=int(t * 1e9))
+        w.finish()
     return stats
 
 

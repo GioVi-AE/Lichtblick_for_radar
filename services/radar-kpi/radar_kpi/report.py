@@ -77,11 +77,18 @@ def render_report(run: dict, kpi: dict) -> str:
                  ("Confirmed ratio", _pct(t.get("confirmed_ratio")))]
         if t.get("continuity") is not None:
             rows.append(("Track continuity", f'{_pct(t["continuity"])}; {t.get("fragmentations")} fragmentations, {t.get("id_switches")} ID switches'))
+        if t.get("xy_frame"):
+            xf = t["xy_frame"]
+            rows.append(("Track x/y axes", f'{xf["selected"]} ({"chosen by ground truth" if xf["confident"] else "ambiguous"})'))
         if t.get("nees_consistency") is not None:
             rows.append(("NEES consistency (95 %)", _pct(t["nees_consistency"])))
     if kpi.get("health"):
         hl = kpi["health"]
-        rows.append(("RV-map health", f'{hl["saturated_frames"]}/{hl["frames"]} saturated, {hl["timeout_frames"]} timeouts, max age {_fmt(hl["max_age_ms"], 0, " ms")}'))
+        if hl.get("source") == "RvMapHealth":
+            rows.append(("RV-map health", f'{hl["saturated_frames"]}/{hl["frames"]} saturated, {hl["timeout_frames"]} timeouts, max age {_fmt(hl["max_age_ms"], 0, " ms")}'))
+        else:
+            rows.append(("RV-map (measured on frames)", f'{hl["frames"]} frames, median period {_fmt(hl.get("median_period_ms"), 1, " ms")}, '
+                         f'{hl["timeout_frames"]} gaps > 5x period, max gap {_fmt(hl["max_age_ms"], 0, " ms")}; saturation not derivable'))
     table = "".join(f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>" for k, v in rows)
     s = kpi.get("samples", [])
     ok = [x for x in s if x["ok"]]

@@ -378,6 +378,7 @@ def track_kpi(
     gt: Track | None,
     status: Status | None,
     params: KpiParams,
+    local_ned: np.ndarray | None = None,
 ) -> dict:
     ids = tracks.ids
     uniq = np.unique(ids)
@@ -416,6 +417,8 @@ def track_kpi(
     # positions in NED about anchor
     if tracks.lla is not None:
         ned = lla_to_ned(anchor, tracks.lla[:, 0], tracks.lla[:, 1], tracks.lla[:, 2])
+    elif local_ned is not None:
+        ned = local_ned
     elif tracks.local is not None:
         ned = local_to_ned(frame, tracks.local)
     else:
@@ -474,13 +477,31 @@ def track_kpi(
 
 
 def health_kpi(status: Status | None) -> dict | None:
-    if status is None or not status.rv_health:
+    if status is None:
         return None
-    h = status.rv_health
+    if status.rv_health:
+        h = status.rv_health
+        return {
+            "source": "RvMapHealth",
+            "frames": len(h),
+            "saturated_frames": int(sum(1 for x in h if x["saturated"])),
+            "timeout_frames": int(sum(1 for x in h if x["timeout"])),
+            "max_saturation_ratio": _f(max(x["saturation_ratio"] for x in h)),
+            "max_age_ms": _f(max(x["age_ms"] for x in h)),
+        }
+    d = status.rv_derived
+    if d is None:
+        return None
+    # measured on the RV maps: no saturation information, "age" = largest gap between consecutive frames
     return {
-        "frames": len(h),
-        "saturated_frames": int(sum(1 for x in h if x["saturated"])),
-        "timeout_frames": int(sum(1 for x in h if x["timeout"])),
-        "max_saturation_ratio": _f(max(x["saturation_ratio"] for x in h)),
-        "max_age_ms": _f(max(x["age_ms"] for x in h)),
+        "source": "derived from RV maps",
+        "frames": d["frames"],
+        "saturated_frames": None,
+        "timeout_frames": d["timeout_gaps"],
+        "max_saturation_ratio": None,
+        "max_age_ms": _f(d["max_gap_ms"]),
+        "median_period_ms": _f(d["median_period_ms"]),
+        "p99_period_ms": _f(d["p99_period_ms"]),
+        "peak_median": _f(d["peak_median"]),
+        "peak_max": _f(d["peak_max"]),
     }

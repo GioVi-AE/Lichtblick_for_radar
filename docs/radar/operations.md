@@ -1,5 +1,7 @@
 # Operations and acceptance
 
+_Author: Giovanni Viglialoro._
+
 ```bash
 docker compose up --build -d
 curl localhost:8080/kpi/health            # {"status":"ok",...}
@@ -14,3 +16,10 @@ REST: `GET /runs`, `POST /rescan`, `GET /runs/by-url?url=`, `GET /runs/{id}`, `/
 `/kpi.csv`, `/report.html`.
 
 Tests: `docker build --target test services/radar-kpi` and the extension tests (see `README.md`).
+
+## Time-fixed copies and CV export
+
+* `POST /kpi/runs/{id}/timefix` starts a background job (about 13 s for 1.2 GB), `GET` returns state/progress/url; results live in
+  the `kpi-cache` volume (`fixed/`), mounted read-only into `data-server`.
+* `python -m radar_kpi.export_cv <run-id> out.mcap [--check]` writes a bag in the `eagle_radar` contract (`CVDetection`)
+  from a native bag and, with `--check`, compares the KPIs of both paths.

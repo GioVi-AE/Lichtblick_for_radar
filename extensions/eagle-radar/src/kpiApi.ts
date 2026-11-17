@@ -31,6 +31,16 @@ export interface RunInfo {
   indexed: boolean;
   bbox: [number, number, number, number] | null; // minLat, minLon, maxLat, maxLon
   notes: string[];
+  /** Only for log_time in seconds: state of the nanosecond-time copy (data_url of the copy when done). */
+  time_fix?: TimeFixStatus | null;
+}
+
+export interface TimeFixStatus {
+  state: "none" | "running" | "done" | "error";
+  progress?: number;
+  url?: string;
+  size_bytes?: number;
+  error?: string;
 }
 
 export type LatLonTrack = [number, number, number, number][]; // t, lat, lon, alt
@@ -40,6 +50,7 @@ export interface RunContext {
   anchor: { lat: number; lon: number; alt: number; frame: "NED" | "ENU"; residual_std_m: number | null; source: string } | null;
   carrier: LatLonTrack;
   target: LatLonTrack;
+  xy_frame?: { selected: string; confident: boolean } | null;
   target_topic: string | null;
   carrier_topic: string | null;
   warnings: string[];
@@ -116,13 +127,20 @@ export interface KpiResult {
     nees_consistency?: number | null;
     mean_snr_db?: number | null;
     missed_update_ratio?: number | null;
+    xy_frame?: { selected: string; confident: boolean; median_horiz_m: Record<string, number>; source: string; target: string };
   } | null;
   health: {
+    /** "RvMapHealth" (reported by the radar) or "derived from RV maps" (measured on the frames, no saturation info) */
+    source: string;
     frames: number;
-    saturated_frames: number;
+    saturated_frames: number | null;
     timeout_frames: number;
-    max_saturation_ratio: number;
-    max_age_ms: number;
+    max_saturation_ratio: number | null;
+    max_age_ms: number | null;
+    median_period_ms?: number | null;
+    p99_period_ms?: number | null;
+    peak_median?: number | null;
+    peak_max?: number | null;
   } | null;
   samples: { t: number; range: number | null; horiz: number; vert: number; d3: number; az: number | null; el: number | null; ok: boolean; p: number | null }[];
 }
@@ -161,6 +179,14 @@ export class KpiClient {
   runs(): Promise<RunInfo[]> {
     return this.get("/runs");
   }
+  timeFixStatus(id: string): Promise<TimeFixStatus> {
+    return this.get(`/runs/${id}/timefix`);
+  }
+  async startTimeFix(id: string): Promise<TimeFixStatus> {
+    const res = await fetch(`${this.baseUrl}/runs/${id}/timefix`, { method: "POST" });
+    if (!res.ok) throw new Error(`KPI service ${res.status}`);
+    return (await res.json()) as TimeFixStatus;
+  }
   async rescan(): Promise<void> {
     await fetch(`${this.baseUrl}/rescan`, { method: "POST" });
   }
@@ -182,8 +208,8 @@ export class KpiClient {
 }
 
 /** Lichtblick remote-file URL to open a run. */
-export function lichtblickOpenUrl(run: RunInfo): string {
-  const abs = `${globalThis.location.origin}${run.data_url}`;
+export function lichtblickOpenUrl(run: RunInfo, dataUrl: string = run.data_url): string {
+  const abs = `${globalThis.location.origin}${dataUrl}`;
   return `${globalThis.location.origin}/?ds=remote-file&ds.url=${encodeURIComponent(abs)}`;
 }
 

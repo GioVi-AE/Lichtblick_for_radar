@@ -42,6 +42,7 @@ services:
     volumes:
       - ${RAW_DATA_DIR:-./data/raw}:/data/raw:ro
       - ${PROCESSED_DATA_DIR:-./data/processed}:/data/processed:ro
+      - kpi-cache:/cache:ro
     restart: unless-stopped
 
 volumes:
